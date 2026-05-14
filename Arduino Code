@@ -1,0 +1,76 @@
+#define BLYNK_TEMPLATE_ID   "TMPL6-XY4350L"
+#define BLYNK_TEMPLATE_NAME "IOT"
+#define BLYNK_AUTH_TOKEN    "aCWuGwtd1LKLHTHk9yIHNnHzrrDcMVvF"
+#include <WiFi.h>
+#include <BlynkSimpleEsp32.h>
+#define CURRENT_SENSOR_PIN  35   // ACS712 OUT
+#define PIR_PIN             34   // PIR OUT
+#define RELAY_PIN            2   // LED
+float sensitivity   = 0.066;    // 30A module: 66 mV/A
+float mainsVoltage  = 220.0;    // Pakistan mains
+float current       = 0;
+float power         = 0;
+float energy_kWh    = 0;
+unsigned long lastTime = 0;
+int  ledState   = 0;      // tracks Blynk V5 command  (0=OFF,1=ON)
+bool alertSent  = false;
+char ssid[] = "Zed";
+char pass[] = "ghip7604";
+BlynkTimer timer;
+BLYNK_WRITE(V5) {
+  ledState = param.asInt();
+  // Relay is active-LOW (same wiring as your working code)
+  digitalWrite(RELAY_PIN, ledState == 1 ? LOW : HIGH);
+  if (ledState == 0) alertSent = false;
+}
+void readEnergyData() {
+  const int samples = 500;
+  long sum = 0;
+
+  for (int i = 0; i < samples; i++) {
+    sum += analogRead(CURRENT_SENSOR_PIN);
+  }
+  float sensorValue   = (float)sum / samples;
+  float sensorVoltage = (sensorValue / 4095.0f) * 3.3f;
+  float offsetVoltage = 1.65f;
+  current = fabsf((sensorVoltage - offsetVoltage) / sensitivity);
+  if (current < 0.08f) current = 0;   // noise floor
+  power = mainsVoltage * current;
+  unsigned long now   = millis();
+  float timeHours     = (now - lastTime) / 3600000.0f;
+  lastTime            = now;
+  energy_kWh         += (power / 1000.0f) * timeHours;
+  Blynk.virtualWrite(V1, current);    // A
+  Blynk.virtualWrite(V2, power);      // W
+  Blynk.virtualWrite(V3, energy_kWh); // kWh
+  Serial.printf("Current: %.3f A | Power: %.1f W | Energy: %.4f kWh\n",
+                current, power, energy_kWh);
+}
+void checkRoomAndLight() {
+  int motion = digitalRead(PIR_PIN);
+  Blynk.virtualWrite(V6, motion);   // 1 = person present
+  if (motion == LOW && ledState == 1 && !alertSent) {
+    Blynk.logEvent("turn_off_light","No person detected in the room. Please turn off the light.");
+    Serial.println("ALERT SENT");
+    alertSent = true;
+  }
+  if (motion == HIGH) alertSent = false;
+  Serial.printf("Motion: %d | Relay/LED state: %d\n", motion, ledState);
+}
+void setup() {
+  Serial.begin(115200);
+  pinMode(CURRENT_SENSOR_PIN, INPUT);
+  pinMode(PIR_PIN, INPUT);
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, HIGH);   // relay OFF on boot (active-LOW)
+  lastTime = millis();
+  Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
+  timer.setInterval(2000L, readEnergyData);
+  timer.setTimeout (1000L, []() {           // start PIR 1 s later …
+    timer.setInterval(2000L, checkRoomAndLight); // … then every 2 s
+  });
+}
+void loop() {
+  Blynk.run();
+  timer.run();
+}
